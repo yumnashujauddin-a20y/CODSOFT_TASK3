@@ -1,10 +1,11 @@
 # ============================================================
 # CHURNAI - CUSTOMER CHURN INTELLIGENCE PLATFORM
-# Complete upgraded Streamlit application
+# Upgraded Streamlit application
 # ============================================================
 
-import os
 import json
+from pathlib import Path
+
 import joblib
 import numpy as np
 import pandas as pd
@@ -21,6 +22,7 @@ from sklearn.metrics import (
     confusion_matrix,
 )
 
+
 # ============================================================
 # PAGE CONFIG
 # ============================================================
@@ -32,21 +34,25 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+
 # ============================================================
 # PATHS
 # ============================================================
-from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
 DATA_PATH = BASE_DIR / "Churn_Modelling.csv"
-MODEL_PATH = BASE_DIR / "customer_churn_model.joblib"
+
+# Your existing project contains this file.
+MODEL_PATH = BASE_DIR / "customer_churn_model.pkl"
+
+# Optional metadata file. The app works without it.
 METADATA_PATH = BASE_DIR / "customer_churn_model_metadata.json"
 
 
 # ============================================================
 # MODEL FEATURES
-# IMPORTANT: These must match the features used during training.
+# Must match the columns used when training the model.
 # ============================================================
 
 MODEL_FEATURES = [
@@ -64,6 +70,7 @@ MODEL_FEATURES = [
 
 TARGET = "Exited"
 
+
 # ============================================================
 # CUSTOM CSS
 # ============================================================
@@ -71,6 +78,7 @@ TARGET = "Exited"
 st.markdown(
     """
 <style>
+
 .stApp {
     background:
         radial-gradient(circle at 5% 0%, rgba(99,102,241,.18), transparent 27%),
@@ -239,10 +247,12 @@ div[data-testid="stMetric"] {
     font-size: 12px;
     padding-top: 35px;
 }
+
 </style>
 """,
     unsafe_allow_html=True,
 )
+
 
 # ============================================================
 # HELPERS
@@ -250,25 +260,29 @@ div[data-testid="stMetric"] {
 
 @st.cache_data
 def load_data():
-    if not os.path.exists(DATA_PATH):
+    if not DATA_PATH.exists():
         return None
     return pd.read_csv(DATA_PATH)
 
 
 @st.cache_resource
 def load_model():
-    if not os.path.exists(MODEL_PATH):
+    if not MODEL_PATH.exists():
         return None
-    return joblib.load(MODEL_PATH)
+    try:
+        return joblib.load(MODEL_PATH)
+    except Exception as exc:
+        st.error(f"Could not load model: {exc}")
+        return None
 
 
 @st.cache_data
 def load_metadata():
-    if not os.path.exists(METADATA_PATH):
+    if not METADATA_PATH.exists():
         return {}
     try:
-        with open(METADATA_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(METADATA_PATH, "r", encoding="utf-8") as file:
+            return json.load(file)
     except Exception:
         return {}
 
@@ -314,38 +328,45 @@ def create_gauge(value):
             },
         )
     )
+
     fig.update_layout(
         height=285,
         margin=dict(l=20, r=20, t=25, b=5),
         paper_bgcolor="rgba(0,0,0,0)",
         font={"color": "white"},
     )
+
     return fig
 
 
 def validate_columns(frame, columns=MODEL_FEATURES):
-    missing = [c for c in columns if c not in frame.columns]
-    return missing
+    return [column for column in columns if column not in frame.columns]
 
 
 def prepare_model_input(frame):
-    """Return only the exact columns expected by the saved model."""
     missing = validate_columns(frame)
+
     if missing:
         raise ValueError(
             "The saved model expects these features, but they are missing: "
             + ", ".join(missing)
         )
+
     return frame[MODEL_FEATURES].copy()
 
 
 def get_model_expected_features(model):
-    """Try to inspect feature names saved by sklearn/pipeline."""
-    for obj in [model, getattr(model, "named_steps", {}).get("preprocessor", None)]:
+    candidates = [
+        model,
+        getattr(model, "named_steps", {}).get("preprocessor", None),
+    ]
+
+    for obj in candidates:
         if obj is not None:
             names = getattr(obj, "feature_names_in_", None)
             if names is not None:
                 return list(names)
+
     return None
 
 
@@ -358,6 +379,32 @@ def chart_layout(fig, height=None):
         margin=dict(l=20, r=20, t=55, b=25),
     )
     return fig
+
+
+def get_historical_metrics(model, frame):
+    """Calculate metrics on the loaded dataset.
+
+    This is descriptive only, not a substitute for an unseen test set.
+    """
+    features = prepare_model_input(frame)
+    predictions = model.predict(features)
+    probabilities = model.predict_proba(features)[:, 1]
+
+    return {
+        "accuracy": accuracy_score(frame[TARGET], predictions),
+        "precision": precision_score(
+            frame[TARGET], predictions, zero_division=0
+        ),
+        "recall": recall_score(
+            frame[TARGET], predictions, zero_division=0
+        ),
+        "f1": f1_score(
+            frame[TARGET], predictions, zero_division=0
+        ),
+        "auc": roc_auc_score(frame[TARGET], probabilities),
+        "predictions": predictions,
+        "probabilities": probabilities,
+    }
 
 
 # ============================================================
@@ -376,7 +423,7 @@ if model is None:
     st.error(
         "Trained model not found.\n\n"
         f"Expected file:\n{MODEL_PATH}\n\n"
-        "Run your training script first."
+        "Place customer_churn_model.pkl in the same folder as app.py."
     )
     st.stop()
 
@@ -385,12 +432,14 @@ if TARGET not in df.columns:
     st.stop()
 
 missing_dataset_features = validate_columns(df)
+
 if missing_dataset_features:
     st.error(
         "The dataset is missing model features: "
         + ", ".join(missing_dataset_features)
     )
     st.stop()
+
 
 # ============================================================
 # DATA SUMMARY
@@ -399,10 +448,15 @@ if missing_dataset_features:
 total_customers = len(df)
 churned_customers = int(df[TARGET].sum())
 active_customers = total_customers - churned_customers
-churn_rate = churned_customers / total_customers if total_customers else 0
+churn_rate = (
+    churned_customers / total_customers
+    if total_customers
+    else 0
+)
 
 model_name = metadata.get("model", type(model).__name__)
 roc_auc_meta = metadata.get("roc_auc", None)
+
 
 # ============================================================
 # SIDEBAR
@@ -440,11 +494,14 @@ with st.sidebar:
     st.write(f"📊 {churn_rate:.1%} churn rate")
 
     st.divider()
+
     st.caption("MODEL")
     st.write(f"🤖 {model_name}")
 
     st.divider()
+
     st.caption("ChurnAI v2.0 • ML Analytics")
+
 
 # ============================================================
 # HERO
@@ -466,6 +523,7 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
 
 # ============================================================
 # DASHBOARD
@@ -525,34 +583,37 @@ if page == "🏠 Dashboard":
             hole=0.64,
             title="Customer Distribution",
         )
+
         fig.update_traces(textinfo="percent+label")
         chart_layout(fig, 390)
         st.plotly_chart(fig, use_container_width=True)
 
     with chart2:
-        if "Geography" in df.columns:
-            geo_df = (
-                df.groupby("Geography")[TARGET]
-                .mean()
-                .reset_index()
-            )
-            geo_df["Churn Rate"] = geo_df[TARGET] * 100
+        geo_df = (
+            df.groupby("Geography")[TARGET]
+            .mean()
+            .reset_index()
+        )
 
-            fig = px.bar(
-                geo_df,
-                x="Geography",
-                y="Churn Rate",
-                text="Churn Rate",
-                title="Churn Rate by Geography",
-            )
-            fig.update_traces(
-                texttemplate="%{text:.1f}%",
-                textposition="outside",
-            )
-            chart_layout(fig, 390)
-            fig.update_yaxes(title="Churn Rate (%)")
-            fig.update_xaxes(title="")
-            st.plotly_chart(fig, use_container_width=True)
+        geo_df["Churn Rate"] = geo_df[TARGET] * 100
+
+        fig = px.bar(
+            geo_df,
+            x="Geography",
+            y="Churn Rate",
+            text="Churn Rate",
+            title="Churn Rate by Geography",
+        )
+
+        fig.update_traces(
+            texttemplate="%{text:.1f}%",
+            textposition="outside",
+        )
+
+        chart_layout(fig, 390)
+        fig.update_yaxes(title="Churn Rate (%)")
+        fig.update_xaxes(title="")
+        st.plotly_chart(fig, use_container_width=True)
 
     st.markdown(
         '<div class="section-title">Customer Demographics</div>',
@@ -560,6 +621,7 @@ if page == "🏠 Dashboard":
     )
 
     age_df = df.copy()
+
     age_df["Age Group"] = pd.cut(
         age_df["Age"],
         bins=[17, 25, 35, 45, 55, 100],
@@ -571,6 +633,7 @@ if page == "🏠 Dashboard":
         .mean()
         .reset_index()
     )
+
     age_churn["Churn Rate"] = age_churn[TARGET] * 100
 
     fig = px.line(
@@ -580,10 +643,23 @@ if page == "🏠 Dashboard":
         markers=True,
         title="Churn Rate by Age Group",
     )
+
     chart_layout(fig, 360)
     fig.update_yaxes(title="Churn Rate (%)")
     fig.update_xaxes(title="")
     st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown(
+        '<div class="section-title">Dataset Snapshot</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.dataframe(
+        df.head(10),
+        use_container_width=True,
+        hide_index=True,
+    )
+
 
 # ============================================================
 # CHURN PREDICTOR
@@ -599,9 +675,9 @@ elif page == "🔮 Churn Predictor":
     st.markdown(
         """
         <div class="info-box">
-        Enter a customer's profile below. ChurnAI will estimate the
-        probability that this customer will churn and classify the customer
-        into Low, Medium, or High risk.
+        Enter a customer's profile below. ChurnAI estimates the probability
+        that the customer will churn and classifies the customer into
+        Low, Medium, or High risk.
         </div>
         """,
         unsafe_allow_html=True,
@@ -613,8 +689,10 @@ elif page == "🔮 Churn Predictor":
 
     with c1:
         st.markdown("### 👤 Personal Profile")
+
         age = st.slider("Age", 18, 100, 35)
         gender = st.selectbox("Gender", ["Male", "Female"])
+
         geography = st.selectbox(
             "Geography",
             ["France", "Germany", "Spain"],
@@ -622,13 +700,21 @@ elif page == "🔮 Churn Predictor":
 
     with c2:
         st.markdown("### 💳 Financial Profile")
-        credit_score = st.slider("Credit Score", 300, 850, 650)
+
+        credit_score = st.slider(
+            "Credit Score",
+            300,
+            850,
+            650,
+        )
+
         balance = st.number_input(
             "Balance",
             min_value=0.0,
             value=50000.0,
             step=5000.0,
         )
+
         estimated_salary = st.number_input(
             "Estimated Salary",
             min_value=0.0,
@@ -638,15 +724,24 @@ elif page == "🔮 Churn Predictor":
 
     with c3:
         st.markdown("### 📈 Account Profile")
-        tenure = st.slider("Tenure (Years)", 0, 10, 5)
+
+        tenure = st.slider(
+            "Tenure (Years)",
+            0,
+            10,
+            5,
+        )
+
         num_products = st.selectbox(
             "Number of Products",
             [1, 2, 3, 4],
         )
+
         has_card = st.selectbox(
             "Has Credit Card?",
             ["Yes", "No"],
         )
+
         active_member = st.selectbox(
             "Active Member?",
             ["Yes", "No"],
@@ -660,6 +755,7 @@ elif page == "🔮 Churn Predictor":
     )
 
     if predict:
+
         customer = pd.DataFrame(
             {
                 "CreditScore": [credit_score],
@@ -683,9 +779,14 @@ elif page == "🔮 Churn Predictor":
             probability = float(
                 model.predict_proba(customer)[0][1]
             )
+
             threshold = float(
-                metadata.get("classification_threshold", 0.50)
+                metadata.get(
+                    "classification_threshold",
+                    0.50,
+                )
             )
+
             prediction = int(probability >= threshold)
             risk = make_risk(probability)
 
@@ -749,11 +850,13 @@ elif page == "🔮 Churn Predictor":
                     "Recommended: personalized offer, proactive support, "
                     "loyalty benefit, or plan review."
                 )
+
             elif risk == "Medium":
                 st.warning(
                     "⚠️ MEDIUM RISK — Monitor this customer and consider "
                     "targeted engagement."
                 )
+
             else:
                 st.success(
                     "✅ LOW RISK — This customer currently appears unlikely "
@@ -767,14 +870,14 @@ elif page == "🔮 Churn Predictor":
                     hide_index=True,
                 )
 
-        except Exception as e:
+        except Exception as exc:
             st.error(
-                "Prediction could not be completed. "
-                "Please verify that the saved model was trained using "
-                "the exact feature set shown below."
+                "Prediction could not be completed. Verify that the saved "
+                "model was trained using the exact feature set shown below."
             )
             st.code(", ".join(MODEL_FEATURES))
-            st.exception(e)
+            st.exception(exc)
+
 
 # ============================================================
 # CUSTOMER RISK
@@ -799,10 +902,12 @@ elif page == "👥 Customer Risk":
 
         risk_df = df.copy()
         risk_df["Churn Probability"] = probabilities
-        risk_df["Risk Level"] = risk_df["Churn Probability"].apply(make_risk)
+        risk_df["Risk Level"] = risk_df["Churn Probability"].apply(
+            make_risk
+        )
 
-    except Exception as e:
-        st.error(f"Could not score the dataset: {e}")
+    except Exception as exc:
+        st.error(f"Could not score the dataset: {exc}")
         st.stop()
 
     high_count = int((risk_df["Risk Level"] == "High").sum())
@@ -828,7 +933,11 @@ elif page == "👥 Customer Risk":
     risk_counts = pd.DataFrame(
         {
             "Risk Level": ["High", "Medium", "Low"],
-            "Customers": [high_count, medium_count, low_count],
+            "Customers": [
+                high_count,
+                medium_count,
+                low_count,
+            ],
         }
     )
 
@@ -839,6 +948,7 @@ elif page == "👥 Customer Risk":
         text="Customers",
         title="Predicted Customer Risk Distribution",
     )
+
     fig.update_traces(textposition="outside")
     chart_layout(fig, 350)
     st.plotly_chart(fig, use_container_width=True)
@@ -872,7 +982,8 @@ elif page == "👥 Customer Risk":
     ].copy()
 
     display_columns = [
-        c for c in [
+        column
+        for column in [
             "CustomerId",
             "Surname",
             "Geography",
@@ -885,7 +996,7 @@ elif page == "👥 Customer Risk":
             "Churn Probability",
             "Risk Level",
         ]
-        if c in filtered.columns
+        if column in filtered.columns
     ]
 
     table = filtered[display_columns].sort_values(
@@ -893,7 +1004,9 @@ elif page == "👥 Customer Risk":
         ascending=False,
     )
 
-    st.caption(f"Showing {min(len(table), 100):,} highest-risk matching customers.")
+    st.caption(
+        f"Showing {min(len(table), 100):,} highest-risk matching customers."
+    )
 
     st.dataframe(
         table.head(100),
@@ -910,6 +1023,7 @@ elif page == "👥 Customer Risk":
         mime="text/csv",
         use_container_width=True,
     )
+
 
 # ============================================================
 # ANALYTICS
@@ -930,6 +1044,7 @@ elif page == "📈 Analytics":
             .mean()
             .reset_index()
         )
+
         gender_df["Churn Rate"] = gender_df[TARGET] * 100
 
         fig = px.bar(
@@ -939,10 +1054,12 @@ elif page == "📈 Analytics":
             text="Churn Rate",
             title="Churn Rate by Gender",
         )
+
         fig.update_traces(
             texttemplate="%{text:.1f}%",
             textposition="outside",
         )
+
         chart_layout(fig, 350)
         fig.update_yaxes(title="Churn Rate (%)")
         st.plotly_chart(fig, use_container_width=True)
@@ -953,9 +1070,16 @@ elif page == "📈 Analytics":
             .mean()
             .reset_index()
         )
+
         active_df["Churn Rate"] = active_df[TARGET] * 100
-        active_df["Member Status"] = active_df["IsActiveMember"].map(
-            {0: "Inactive", 1: "Active"}
+
+        active_df["Member Status"] = active_df[
+            "IsActiveMember"
+        ].map(
+            {
+                0: "Inactive",
+                1: "Active",
+            }
         )
 
         fig = px.bar(
@@ -965,10 +1089,12 @@ elif page == "📈 Analytics":
             text="Churn Rate",
             title="Churn Rate by Member Activity",
         )
+
         fig.update_traces(
             texttemplate="%{text:.1f}%",
             textposition="outside",
         )
+
         chart_layout(fig, 350)
         fig.update_yaxes(title="Churn Rate (%)")
         st.plotly_chart(fig, use_container_width=True)
@@ -978,6 +1104,7 @@ elif page == "📈 Analytics":
         .mean()
         .reset_index()
     )
+
     products_df["Churn Rate"] = products_df[TARGET] * 100
 
     fig = px.bar(
@@ -987,10 +1114,12 @@ elif page == "📈 Analytics":
         text="Churn Rate",
         title="Churn Rate by Number of Products",
     )
+
     fig.update_traces(
         texttemplate="%{text:.1f}%",
         textposition="outside",
     )
+
     chart_layout(fig, 380)
     fig.update_yaxes(title="Churn Rate (%)")
     st.plotly_chart(fig, use_container_width=True)
@@ -1004,6 +1133,7 @@ elif page == "📈 Analytics":
         opacity=0.65,
         labels={"Exited": "Churned"},
     )
+
     chart_layout(fig, 430)
     st.plotly_chart(fig, use_container_width=True)
 
@@ -1030,8 +1160,10 @@ elif page == "📈 Analytics":
         title="Feature Correlation Matrix",
         aspect="auto",
     )
+
     chart_layout(fig, 520)
     st.plotly_chart(fig, use_container_width=True)
+
 
 # ============================================================
 # MODEL PERFORMANCE
@@ -1063,8 +1195,9 @@ elif page == "🤖 Model Performance":
         value = (
             f"{float(roc_auc_meta):.3f}"
             if roc_auc_meta is not None
-            else "N/A"
+            else "Calculated below"
         )
+
         st.markdown(
             f"""
             <div class="kpi-card">
@@ -1076,12 +1209,17 @@ elif page == "🤖 Model Performance":
         )
 
     with m3:
+        training_rows = metadata.get(
+            "training_rows",
+            "Available dataset",
+        )
+
         st.markdown(
             f"""
             <div class="kpi-card">
                 <div class="kpi-label">Training Rows</div>
                 <div class="kpi-value">
-                    {metadata.get("training_rows", "N/A")}
+                    {training_rows}
                 </div>
             </div>
             """,
@@ -1093,6 +1231,11 @@ elif page == "🤖 Model Performance":
         unsafe_allow_html=True,
     )
 
+    threshold = metadata.get(
+        "classification_threshold",
+        0.50,
+    )
+
     st.markdown(
         f"""
         <div class="info-box">
@@ -1100,8 +1243,7 @@ elif page == "🤖 Model Performance":
             <br><br>
             <b style="color:white;">Target:</b> Customer churn / Exited
             <br><br>
-            <b style="color:white;">Classification threshold:</b>
-            {metadata.get("classification_threshold", 0.50)}
+            <b style="color:white;">Classification threshold:</b> {threshold}
             <br><br>
             <b style="color:white;">Features:</b>
             {", ".join(MODEL_FEATURES)}
@@ -1114,6 +1256,7 @@ elif page == "🤖 Model Performance":
     )
 
     expected = get_model_expected_features(model)
+
     if expected:
         with st.expander("🔍 Saved model feature information"):
             st.write("Features exposed by the saved estimator:")
@@ -1125,37 +1268,27 @@ elif page == "🤖 Model Performance":
     )
 
     st.info(
-        "These metrics evaluate the saved model on the loaded historical "
-        "dataset. For a formal report, use a separate unseen test set."
+        "The metrics below evaluate the saved model on the loaded historical "
+        "dataset. They are useful for a dashboard, but they should not be "
+        "reported as unseen test-set performance unless the dataset is "
+        "actually an independent test set."
     )
 
     try:
-        feature_df = prepare_model_input(df)
-
-        predictions = model.predict(feature_df)
-        probabilities = model.predict_proba(feature_df)[:, 1]
-
-        acc = accuracy_score(df[TARGET], predictions)
-        precision = precision_score(
-            df[TARGET], predictions, zero_division=0
-        )
-        recall = recall_score(
-            df[TARGET], predictions, zero_division=0
-        )
-        f1 = f1_score(
-            df[TARGET], predictions, zero_division=0
-        )
-        auc = roc_auc_score(df[TARGET], probabilities)
+        metrics = get_historical_metrics(model, df)
 
         p1, p2, p3, p4, p5 = st.columns(5)
 
-        p1.metric("Accuracy", f"{acc:.1%}")
-        p2.metric("Precision", f"{precision:.1%}")
-        p3.metric("Recall", f"{recall:.1%}")
-        p4.metric("F1 Score", f"{f1:.1%}")
-        p5.metric("ROC-AUC", f"{auc:.3f}")
+        p1.metric("Accuracy", f"{metrics['accuracy']:.1%}")
+        p2.metric("Precision", f"{metrics['precision']:.1%}")
+        p3.metric("Recall", f"{metrics['recall']:.1%}")
+        p4.metric("F1 Score", f"{metrics['f1']:.1%}")
+        p5.metric("ROC-AUC", f"{metrics['auc']:.3f}")
 
-        cm = confusion_matrix(df[TARGET], predictions)
+        cm = confusion_matrix(
+            df[TARGET],
+            metrics["predictions"],
+        )
 
         cm_df = pd.DataFrame(
             cm,
@@ -1169,13 +1302,13 @@ elif page == "🤖 Model Performance":
             title="Confusion Matrix",
             aspect="auto",
         )
+
         chart_layout(fig, 430)
         st.plotly_chart(fig, use_container_width=True)
 
-        # Probability distribution
         probability_df = pd.DataFrame(
             {
-                "Churn Probability": probabilities,
+                "Churn Probability": metrics["probabilities"],
                 "Actual Outcome": np.where(
                     df[TARGET].values == 1,
                     "Churned",
@@ -1192,16 +1325,18 @@ elif page == "🤖 Model Performance":
             title="Predicted Churn Probability Distribution",
             marginal="box",
         )
+
         chart_layout(fig, 430)
         st.plotly_chart(fig, use_container_width=True)
 
-    except Exception as e:
+    except Exception as exc:
         st.error(
             "Could not calculate model evaluation metrics. "
             "Make sure the saved model was trained with the same "
-            "feature set and compatible scikit-learn version."
+            "feature set and a compatible scikit-learn version."
         )
-        st.exception(e)
+        st.exception(exc)
+
 
 # ============================================================
 # FOOTER
